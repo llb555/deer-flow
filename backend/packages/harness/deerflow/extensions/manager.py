@@ -25,6 +25,7 @@ import yaml
 from packaging.requirements import InvalidRequirement, Requirement
 
 from deerflow.utils.file_lock import retry_until_locked as _retry_until_locked
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,9 @@ def _write_bytes_atomically(path: Path, content: bytes, mode: int | None) -> Non
     """
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "wb") as handle:
+        handle = os.fdopen(fd, "wb")
+        fd = None  # The file object now owns the descriptor.
+        with handle:
             handle.write(content)
             handle.flush()
             if mode is not None:
@@ -115,7 +118,9 @@ def _write_bytes_atomically(path: Path, content: bytes, mode: int | None) -> Non
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        # Discarding the temporary must not replace the error being raised; the
+        # helper also closes a descriptor that ``fdopen`` never took over.
+        cleanup_failed_atomic_write(Path(temporary), fd)
         raise
 
 
@@ -1000,7 +1005,7 @@ def _write_plugins_block(path: Path, original: str, plugins: list[Any]) -> None:
         temporary = None
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            cleanup_failed_atomic_write(temporary)
 
 
 def _plugins_block_span(original: str) -> tuple[int, int] | None:
